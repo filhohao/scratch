@@ -11,8 +11,23 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import * as gitService from "../services/git";
 import * as notesService from "../services/notes";
-import type { GitStatus } from "../services/git";
+import type { GitStatus, RepoInfo } from "../services/git";
 import { useNotesData } from "./NotesContext";
+
+/** Resolve which repo a note belongs to based on its ID and discovered repos. */
+function repoForNote(
+  repos: RepoInfo[],
+  noteId: string | null,
+  notesFolder: string | null,
+): string | null {
+  if (!noteId || repos.length === 0 || !notesFolder) return null;
+  const firstSegment = noteId.split("/")[0];
+  const match = repos.find((r) => r.name === firstSegment && r.path !== notesFolder);
+  if (match) return match.path;
+  // Fall back to root-level repo
+  const rootRepo = repos.find((r) => r.path === notesFolder);
+  return rootRepo?.path ?? null;
+}
 
 interface GitContextValue {
   // State
@@ -28,6 +43,11 @@ interface GitContextValue {
   isUpdatingGitEnabled: boolean;
   lastError: string | null;
 
+  // Multi-repo state
+  repos: RepoInfo[];
+  activeRepoPath: string | null;
+  activeRepoName: string | null;
+
   // Actions
   setGitEnabled: (enabled: boolean) => Promise<boolean>;
   refreshStatus: () => Promise<void>;
@@ -39,12 +59,13 @@ interface GitContextValue {
   addRemote: (url: string) => Promise<boolean>;
   pushWithUpstream: () => Promise<boolean>;
   clearError: () => void;
+  refreshRepos: () => Promise<void>;
 }
 
 const GitContext = createContext<GitContextValue | null>(null);
 
 export function GitProvider({ children }: { children: ReactNode }) {
-  const { notesFolder } = useNotesData();
+  const { notesFolder, selectedNoteId } = useNotesData();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -57,6 +78,20 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const [isUpdatingGitEnabled, setIsUpdatingGitEnabled] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
 
+  // Multi-repo state
+  const [repos, setRepos] = useState<RepoInfo[]>([]);
+
+  // Derive active repo from selected note
+  const activeRepoPath = useMemo(
+    () => repoForNote(repos, selectedNoteId, notesFolder),
+    [repos, selectedNoteId, notesFolder],
+  );
+  const activeRepoName = useMemo(() => {
+    if (!activeRepoPath) return null;
+    const repo = repos.find((r) => r.path === activeRepoPath);
+    return repo?.name ?? null;
+  }, [repos, activeRepoPath]);
+
   // Use refs to avoid dependency cycles
   const hasLoadedRef = useRef(false);
   const refreshInFlightRef = useRef(false);
@@ -67,6 +102,21 @@ export function GitProvider({ children }: { children: ReactNode }) {
   notesFolderRef.current = notesFolder;
   const gitEnabledRef = useRef(gitEnabled);
   gitEnabledRef.current = gitEnabled;
+  const activeRepoPathRef = useRef(activeRepoPath);
+  activeRepoPathRef.current = activeRepoPath;
+
+  const refreshRepos = useCallback(async () => {
+    if (!notesFolder) {
+      setRepos([]);
+      return;
+    }
+    try {
+      const discovered = await gitService.listRepos();
+      setRepos(discovered);
+    } catch {
+      setRepos([]);
+    }
+  }, [notesFolder]);
 
   const refreshStatus = useCallback(async () => {
     if (!notesFolder || !gitEnabled) return;
@@ -76,6 +126,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
     refreshInFlightRef.current = true;
     const requestId = ++refreshRequestIdRef.current;
     const folderAtStart = notesFolder;
+    const repoAtStart = activeRepoPathRef.current;
     const isStale = () =>
       requestId !== refreshRequestIdRef.current ||
       !gitEnabledRef.current ||
@@ -88,7 +139,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const newStatus = await gitService.getGitStatus();
+      const newStatus = await gitService.getGitStatus(repoAtStart ?? undefined);
 
       if (isStale()) return;
 
@@ -151,19 +202,20 @@ export function GitProvider({ children }: { children: ReactNode }) {
 
   const initRepo = useCallback(async () => {
     try {
-      await gitService.initGitRepo();
+      await gitService.initGitRepo(activeRepoPath ?? undefined);
+      await refreshRepos();
       await refreshStatus();
       return true;
     } catch (err) {
       setLastError(err instanceof Error ? err.message : "Failed to initialize git");
       return false;
     }
-  }, [refreshStatus]);
+  }, [activeRepoPath, refreshRepos, refreshStatus]);
 
   const commit = useCallback(async (message: string) => {
     setIsCommitting(true);
     try {
-      const result = await gitService.gitCommit(message);
+      const result = await gitService.gitCommit(message, activeRepoPathRef.current ?? undefined);
       if (result.error) {
         setLastError(result.error);
         return false;
@@ -181,7 +233,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const push = useCallback(async () => {
     setIsPushing(true);
     try {
-      const result = await gitService.gitPush();
+      const result = await gitService.gitPush(activeRepoPathRef.current ?? undefined);
       if (result.error) {
         setLastError(result.error);
         return false;
@@ -199,7 +251,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const pull = useCallback(async (): Promise<string | false> => {
     setIsPulling(true);
     try {
-      const result = await gitService.gitPull();
+      const result = await gitService.gitPull(activeRepoPathRef.current ?? undefined);
       if (result.error) {
         setLastError(result.error);
         return false;
@@ -216,9 +268,10 @@ export function GitProvider({ children }: { children: ReactNode }) {
 
   const sync = useCallback(async (): Promise<{ ok: true; message: string } | { ok: false; error: string }> => {
     setIsSyncing(true);
+    const repoPath = activeRepoPathRef.current ?? undefined;
     try {
       // Step 1: Pull from remote
-      const pullResult = await gitService.gitPull();
+      const pullResult = await gitService.gitPull(repoPath);
       if (pullResult.error) {
         setLastError(pullResult.error);
         return { ok: false, error: pullResult.error };
@@ -226,11 +279,11 @@ export function GitProvider({ children }: { children: ReactNode }) {
       const didPull = pullResult.message !== "Already up to date";
 
       // Step 2: Check if we need to push
-      const freshStatus = await gitService.getGitStatus();
+      const freshStatus = await gitService.getGitStatus(repoPath);
       let didPush = false;
 
       if (freshStatus.aheadCount > 0 && freshStatus.hasUpstream) {
-        const pushResult = await gitService.gitPush();
+        const pushResult = await gitService.gitPush(repoPath);
         if (pushResult.error) {
           setLastError(pushResult.error);
           await refreshStatus();
@@ -258,11 +311,12 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const addRemote = useCallback(async (url: string) => {
     setIsAddingRemote(true);
     try {
-      const result = await gitService.addRemote(url);
+      const result = await gitService.addRemote(url, activeRepoPathRef.current ?? undefined);
       if (result.error) {
         setLastError(result.error);
         return false;
       }
+      await refreshRepos();
       await refreshStatus();
       return true;
     } catch (err) {
@@ -271,12 +325,12 @@ export function GitProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsAddingRemote(false);
     }
-  }, [refreshStatus]);
+  }, [refreshRepos, refreshStatus]);
 
   const pushWithUpstream = useCallback(async () => {
     setIsPushing(true);
     try {
-      const result = await gitService.pushWithUpstream();
+      const result = await gitService.pushWithUpstream(activeRepoPathRef.current ?? undefined);
       if (result.error) {
         setLastError(result.error);
         return false;
@@ -300,8 +354,17 @@ export function GitProvider({ children }: { children: ReactNode }) {
     gitService.isGitAvailable().then(setGitAvailable);
   }, []);
 
+  // Discover repos when folder changes
+  useEffect(() => {
+    if (notesFolder) {
+      refreshRepos();
+    } else {
+      setRepos([]);
+    }
+  }, [notesFolder, refreshRepos]);
+
   // Load per-folder git visibility setting
-  // If explicitly set in settings, use that. Otherwise auto-detect: enable if the folder is a git repo.
+  // If explicitly set in settings, use that. Otherwise auto-detect: enable if any repo is discovered.
   useEffect(() => {
     if (!notesFolder) {
       settingsReadRequestIdRef.current += 1;
@@ -323,10 +386,10 @@ export function GitProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        // Not explicitly set — auto-detect by checking if folder is a git repo
-        const gitStatus = await gitService.getGitStatus();
+        // Not explicitly set — auto-detect by checking if any repos exist
+        const discovered = await gitService.listRepos();
         if (cancelled || requestId !== settingsReadRequestIdRef.current) return;
-        setGitEnabledState(gitStatus.isRepo === true);
+        setGitEnabledState(discovered.length > 0);
       } catch {
         if (cancelled || requestId !== settingsReadRequestIdRef.current) return;
         setGitEnabledState(false);
@@ -356,16 +419,14 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const isSyncingRef = useRef(false);
   isSyncingRef.current = isSyncing;
 
-  // Refresh status when folder changes
+  // Refresh status when folder, repo, or git state changes
   useEffect(() => {
     if (notesFolder && gitAvailable && gitEnabled) {
       refreshStatus();
     }
-  }, [notesFolder, gitAvailable, gitEnabled, refreshStatus]);
+  }, [notesFolder, gitAvailable, gitEnabled, activeRepoPath, refreshStatus]);
 
   // Poll remote for changes periodically (every 60s) when a remote is configured
-  // Fetch is separated from status to keep status checks fast and offline-friendly
-  // Uses recursive setTimeout to prevent overlapping runs on slow networks
   useEffect(() => {
     if (!notesFolder || !gitAvailable || !gitEnabled || !status?.hasRemote) {
       return;
@@ -376,7 +437,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
 
     const poll = async () => {
       if (!isSyncingRef.current) {
-        await gitService.gitFetch().catch(() => {});
+        await gitService.gitFetch(activeRepoPathRef.current ?? undefined).catch(() => {});
         await refreshStatusRef.current();
       }
       if (!cancelled) {
@@ -393,7 +454,6 @@ export function GitProvider({ children }: { children: ReactNode }) {
   }, [notesFolder, gitAvailable, gitEnabled, status?.hasRemote]);
 
   // Refresh status on file changes (debounced via existing file watcher)
-  // Uses a ref so the listener is registered only once
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let debounceTimer: number | undefined;
@@ -401,7 +461,6 @@ export function GitProvider({ children }: { children: ReactNode }) {
     listen("file-change", () => {
       if (!gitEnabledRef.current) return;
 
-      // Debounce git status refresh to avoid excessive calls
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }
@@ -431,6 +490,9 @@ export function GitProvider({ children }: { children: ReactNode }) {
       gitEnabled,
       isUpdatingGitEnabled,
       lastError,
+      repos,
+      activeRepoPath,
+      activeRepoName,
       setGitEnabled,
       refreshStatus,
       initRepo,
@@ -441,6 +503,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
       addRemote,
       pushWithUpstream,
       clearError,
+      refreshRepos,
     }),
     [
       status,
@@ -454,6 +517,9 @@ export function GitProvider({ children }: { children: ReactNode }) {
       gitEnabled,
       isUpdatingGitEnabled,
       lastError,
+      repos,
+      activeRepoPath,
+      activeRepoName,
       setGitEnabled,
       refreshStatus,
       initRepo,
@@ -464,6 +530,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
       addRemote,
       pushWithUpstream,
       clearError,
+      refreshRepos,
     ]
   );
 

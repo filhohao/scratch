@@ -569,6 +569,48 @@ fn strip_markdown(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// Info about a discovered git repository within the notes folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoInfo {
+    pub name: String,
+    pub path: String,
+    pub has_remote: bool,
+}
+
+fn discover_repos(notes_folder: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(notes_folder) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                repos.push(path);
+            }
+        }
+    }
+    repos
+}
+
+fn repo_for_note(notes_folder: &Path, note_id: &str) -> Option<PathBuf> {
+    // Check if the first path component matches a subfolder repo
+    if let Some(first_component) = note_id.split('/').next() {
+        let candidate = notes_folder.join(first_component);
+        if candidate.join(".git").exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Resolve the git repo folder: use explicit repo_path if provided, otherwise fall back to notes_folder from state.
+fn resolve_git_folder(repo_path: Option<String>, state: &AppState) -> Option<String> {
+    if let Some(path) = repo_path {
+        return Some(path);
+    }
+    let app_config = state.app_config.read().expect("app_config read lock");
+    app_config.notes_folder.clone()
+}
+
 /// Directories to exclude from note discovery and ID resolution.
 const EXCLUDED_DIRS: &[&str] = &[".git", ".scratch", ".obsidian", ".trash", "assets"];
 
@@ -2424,6 +2466,48 @@ async fn open_url_safe(url: String) -> Result<(), String> {
 // Git commands - run blocking git operations off the main thread
 
 #[tauri::command]
+async fn list_repos(state: State<'_, AppState>) -> Result<Vec<RepoInfo>, String> {
+    let folder = {
+        let app_config = state.app_config.read().expect("app_config read lock");
+        app_config.notes_folder.clone()
+    };
+
+    match folder {
+        Some(path) => {
+            tauri::async_runtime::spawn_blocking(move || {
+                let notes_folder = PathBuf::from(&path);
+                let repos = discover_repos(&notes_folder);
+                repos
+                    .into_iter()
+                    .map(|repo_path| {
+                        let name = if repo_path == notes_folder {
+                            notes_folder
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "root".to_string())
+                        } else {
+                            repo_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        };
+                        let has_remote = git::get_remote_url(&repo_path).is_some();
+                        RepoInfo {
+                            name,
+                            path: repo_path.to_string_lossy().to_string(),
+                            has_remote,
+                        }
+                    })
+                    .collect()
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+        None => Ok(vec![]),
+    }
+}
+
+#[tauri::command]
 async fn git_is_available() -> bool {
     tauri::async_runtime::spawn_blocking(git::is_available)
         .await
@@ -2431,11 +2515,8 @@ async fn git_is_available() -> bool {
 }
 
 #[tauri::command]
-async fn git_get_status(state: State<'_, AppState>) -> Result<git::GitStatus, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_get_status(repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitStatus, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2450,11 +2531,17 @@ async fn git_get_status(state: State<'_, AppState>) -> Result<git::GitStatus, St
 }
 
 #[tauri::command]
-async fn git_init_repo(state: State<'_, AppState>) -> Result<(), String> {
-    let folder = {
+async fn git_init_repo(repo_path: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let folder = resolve_git_folder(repo_path, &state).ok_or("Notes folder not set".to_string())?;
+
+    {
         let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone().ok_or("Notes folder not set")?
-    };
+        if let Some(ref main_folder) = app_config.notes_folder {
+            if folder == *main_folder {
+                return Err("Main folder cannot be initialized as a git repository".to_string());
+            }
+        }
+    }
 
     tauri::async_runtime::spawn_blocking(move || {
         git::git_init(&PathBuf::from(folder))
@@ -2464,11 +2551,8 @@ async fn git_init_repo(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn git_commit(message: String, state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_commit(message: String, repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2487,11 +2571,8 @@ async fn git_commit(message: String, state: State<'_, AppState>) -> Result<git::
 }
 
 #[tauri::command]
-async fn git_push(state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_push(repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2510,11 +2591,8 @@ async fn git_push(state: State<'_, AppState>) -> Result<git::GitResult, String> 
 }
 
 #[tauri::command]
-async fn git_fetch(state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_fetch(repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2533,11 +2611,8 @@ async fn git_fetch(state: State<'_, AppState>) -> Result<git::GitResult, String>
 }
 
 #[tauri::command]
-async fn git_pull(state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_pull(repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2556,11 +2631,8 @@ async fn git_pull(state: State<'_, AppState>) -> Result<git::GitResult, String> 
 }
 
 #[tauri::command]
-async fn git_add_remote(url: String, state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_add_remote(url: String, repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -2579,11 +2651,8 @@ async fn git_add_remote(url: String, state: State<'_, AppState>) -> Result<git::
 }
 
 #[tauri::command]
-async fn git_push_with_upstream(state: State<'_, AppState>) -> Result<git::GitResult, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
-    };
+async fn git_push_with_upstream(repo_path: Option<String>, state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    let folder = resolve_git_folder(repo_path, &state);
 
     match folder {
         Some(path) => {
@@ -3687,6 +3756,7 @@ pub fn run() {
             open_folder_dialog,
             open_in_file_manager,
             open_url_safe,
+            list_repos,
             git_is_available,
             git_get_status,
             git_init_repo,

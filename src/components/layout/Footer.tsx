@@ -26,10 +26,11 @@ export const Footer = memo(function Footer({ onOpenSettings }: FooterProps) {
     gitAvailable,
     gitEnabled,
     sync,
-    initRepo,
     commit,
     lastError,
     clearError,
+    repos,
+    activeRepoName,
   } = useGit();
 
   const handleCommit = useCallback(async () => {
@@ -56,14 +57,7 @@ export const Footer = memo(function Footer({ onOpenSettings }: FooterProps) {
     }
   }, [sync, isSyncing]);
 
-  const handleEnableGit = useCallback(async () => {
-    const success = await initRepo();
-    if (success) {
-      toast.success("Git repository initialized");
-    } else {
-      toast.error("Failed to initialize Git");
-    }
-  }, [initRepo]);
+
 
   // Git status section
   const renderGitStatus = () => {
@@ -71,19 +65,9 @@ export const Footer = memo(function Footer({ onOpenSettings }: FooterProps) {
       return null;
     }
 
-    // Not a git repo - show init option
+    // Not a git repo
     if (status && !status.isRepo) {
-      return (
-        <Tooltip content="Initialize Git repository">
-          <Button
-            onClick={handleEnableGit}
-            variant="ghost"
-            className="text-xs h-auto p-0 hover:bg-transparent"
-          >
-            Enable Git
-          </Button>
-        </Tooltip>
-      );
+      return null;
     }
 
     // Show spinner only when loading and no error to display
@@ -95,6 +79,11 @@ export const Footer = memo(function Footer({ onOpenSettings }: FooterProps) {
 
     return (
       <div className="flex items-center gap-1.5">
+        {/* Repo name (only when multiple repos) */}
+        {repos.length > 1 && activeRepoName && (
+          <span className="text-xs text-text-muted/70 font-medium">{activeRepoName}</span>
+        )}
+
         {/* Branch icon with name on hover */}
         {status?.currentBranch ? (
           <Tooltip content={"Branch: " + status.currentBranch}>

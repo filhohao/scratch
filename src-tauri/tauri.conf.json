@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Scratch",
+  "productName": "GitScratch",
   "version": "0.9.1",
   "identifier": "com.scratch.app",
   "build": {
@@ -21,7 +21,10 @@
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 24 },
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 24
+        },
         "visible": false
       }
     ],
@@ -31,7 +34,9 @@
         "enable": true,
         "scope": {
           "requireLiteralLeadingDot": true,
-          "allow": ["$HOME/**"]
+          "allow": [
+            "$HOME/**"
+          ]
         }
       }
     }
@@ -42,7 +47,10 @@
     "createUpdaterArtifacts": true,
     "fileAssociations": [
       {
-        "ext": ["md", "markdown"],
+        "ext": [
+          "md",
+          "markdown"
+        ],
         "mimeType": "text/markdown",
         "description": "Markdown Document"
       }

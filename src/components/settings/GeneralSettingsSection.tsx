@@ -110,7 +110,6 @@ export function GeneralSettingsSection() {
     gitEnabled,
     isUpdatingGitEnabled,
     setGitEnabled,
-    initRepo,
     isLoading,
     addRemote,
     pushWithUpstream,
@@ -118,6 +117,8 @@ export function GeneralSettingsSection() {
     isPushing,
     lastError,
     clearError,
+    repos,
+    activeRepoName,
   } = useGit();
 
   const [remoteUrl, setRemoteUrl] = useState("");
@@ -425,21 +426,41 @@ export function GeneralSettingsSection() {
           <div className="rounded-[10px] border border-border p-4 flex items-center justify-center">
             <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin text-text-muted" />
           </div>
+        ) : repos.length > 1 ? (
+          /* Multi-repo: show list of discovered repositories */
+          <div className="space-y-2">
+            <p className="text-sm text-text-muted">
+              {repos.length} repositories discovered in your notes folder
+            </p>
+            {repos.map((repo) => (
+              <div
+                key={repo.path}
+                className={`flex items-center justify-between p-3 rounded-[10px] border ${
+                  repo.name === activeRepoName
+                    ? "border-accent/50 bg-accent/5"
+                    : "border-border"
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <FolderIcon className="w-4.5 h-4.5 stroke-[1.5] text-text-muted" />
+                  <span className="text-sm font-medium">{repo.name}</span>
+                </div>
+                <span className="text-sm text-text-muted">
+                  {repo.hasRemote ? formatRemoteUrl(null) : "Local only"}
+                </span>
+              </div>
+            ))}
+            <p className="text-xs text-text-muted/70">
+              Select a note to see its repository status in the footer. Each repository syncs independently.
+            </p>
+          </div>
         ) : !status?.isRepo ? (
           <div className="bg-bg-secondary rounded-[10px] border border-border p-4">
             <p className="text-sm text-text-muted mb-2">
-              Enable Git to track changes to your notes with version control.
-              Your changes will be tracked automatically and you can commit and
-              push from the sidebar.
+              Git is enabled. To track changes, initialize a Git repository in
+              any of your subfolders using an external terminal, or open an existing
+              repository as a subfolder.
             </p>
-            <Button
-              onClick={initRepo}
-              disabled={isLoading}
-              variant="outline"
-              size="md"
-            >
-              Initialize Git Repository
-            </Button>
           </div>
         ) : (
           <>
