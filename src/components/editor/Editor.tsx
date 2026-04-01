@@ -1045,6 +1045,16 @@ export function Editor({
           // but prevent focus from leaving the editor
           return false;
         }
+        
+        // Preemptively prevent native browser undo/redo!
+        // If Tiptap's internal history stack is empty (e.g. right after a file loads),
+        // we DO NOT want the browser to natively undo the DOM injection.
+        // Returning `false` ensures Tiptap's History plugins still get a chance to process it.
+        if ((event.metaKey || event.ctrlKey) && (event.key.toLowerCase() === "z" || event.key.toLowerCase() === "y")) {
+          event.preventDefault();
+          return false;
+        }
+
         return false;
       },
       // Handle markdown and image paste
@@ -1318,12 +1328,12 @@ export function Editor({
         if (manager) {
           try {
             const parsed = manager.parse(currentNote.content);
-            editor.commands.setContent(parsed);
+            editor.chain().setContent(parsed).setMeta("addToHistory", false).run();
           } catch {
-            editor.commands.setContent(currentNote.content);
+            editor.chain().setContent(currentNote.content).setMeta("addToHistory", false).run();
           }
         } else {
-          editor.commands.setContent(currentNote.content);
+          editor.chain().setContent(currentNote.content).setMeta("addToHistory", false).run();
         }
         isLoadingRef.current = false;
         return;
@@ -1350,13 +1360,13 @@ export function Editor({
     if (manager) {
       try {
         const parsed = manager.parse(currentNote.content);
-        editor.commands.setContent(parsed);
+        editor.chain().setContent(parsed).setMeta("addToHistory", false).run();
       } catch {
         // Fallback to plain text if parsing fails
-        editor.commands.setContent(currentNote.content);
+        editor.chain().setContent(currentNote.content).setMeta("addToHistory", false).run();
       }
     } else {
-      editor.commands.setContent(currentNote.content);
+      editor.chain().setContent(currentNote.content).setMeta("addToHistory", false).run();
     }
 
     // Scroll to top after content is set (must be after setContent to work reliably)
@@ -1772,12 +1782,12 @@ export function Editor({
       if (manager) {
         try {
           const parsed = manager.parse(sourceContent);
-          editor.commands.setContent(parsed);
+          editor.chain().setContent(parsed).setMeta("addToHistory", false).run();
         } catch {
-          editor.commands.setContent(sourceContent);
+          editor.chain().setContent(sourceContent).setMeta("addToHistory", false).run();
         }
       } else {
-        editor.commands.setContent(sourceContent);
+        editor.chain().setContent(sourceContent).setMeta("addToHistory", false).run();
       }
       setSourceMode(false);
     }
